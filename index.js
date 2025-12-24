@@ -23,32 +23,6 @@ class WhatsifyService {
         });
     }
 
-    async validateNumber(phoneNumber) {
-        try {
-            let cleanedNumber = phoneNumber.replace(/[^\d+]/g, '');
-            if (!cleanedNumber.startsWith('+')) {
-                cleanedNumber = '+' + cleanedNumber;
-            }
-
-            const response = await this.api.post('/validate/whatsapp', {
-                secret: this.apiSecret,
-                unique: this.accountId,
-                phone: cleanedNumber
-            });
-
-            return {
-                success: true,
-                exists: response.data.exists === 'true' || response.data.exists === true
-            };
-        } catch (error) {
-            console.error('Number validation error:', error.response?.data || error.message);
-            return {
-                success: false,
-                error: error.response?.data?.message || error.message
-            };
-        }
-    }
-
     async sendVideo(phoneNumber, videoPath, caption = '') {
         try {
             const formData = new FormData();
@@ -56,11 +30,11 @@ class WhatsifyService {
             formData.append('secret', this.apiSecret);
             formData.append('account', this.accountId);
             formData.append('recipient', phoneNumber);
+            formData.append('type', 'media');  // Changed from 'video' to 'media'
             formData.append('message', caption);
-            formData.append('type', 'video');
 
             const videoBuffer = fs.readFileSync(videoPath);
-            formData.append('video_file', videoBuffer, {
+            formData.append('media_file', videoBuffer, {  // Changed from 'video_file' to 'media_file'
                 filename: path.basename(videoPath),
                 contentType: 'video/mp4'
             });
@@ -109,9 +83,9 @@ class BulkSender {
         this.numbersFile = path.join(__dirname, 'data', 'numbers.txt');
         this.videoFile = path.join(__dirname, 'data', 'video.mp4');
         this.logFile = path.join(__dirname, 'logs', 'sent.log');
-        this.invalidNumbersFile = path.join(__dirname, 'logs', 'invalid_numbers.log');
+        this.failedNumbersFile = path.join(__dirname, 'logs', 'failed_numbers.log');
         this.sentNumbers = new Set();
-        this.invalidNumbers = new Set();
+        this.failedNumbers = new Set();
         this.currentIndex = 0;
         this.isRunning = false;
 
@@ -141,7 +115,7 @@ class BulkSender {
 ਧੰਨਵਾਦ ਜੀ, ਜੇ ਤੁਸੀਂ interested ਹੋ ਤਾਂ ਹੁਣੇ screenshot ਅਤੇ ਆਪਣਾ full address send ਕਰੋ ਜੀ।`;
 
         this.loadSentNumbers();
-        this.loadInvalidNumbers();
+        this.loadFailedNumbers();
     }
 
     loadSentNumbers() {
@@ -149,7 +123,7 @@ class BulkSender {
             const logs = fs.readFileSync(this.logFile, 'utf-8');
             const lines = logs.split('\n').filter(line => line.includes('SUCCESS'));
             lines.forEach(line => {
-                const match = line.match(/\+\d+/);
+                const match = line.match(/\+?\d{10,15}/);
                 if (match) this.sentNumbers.add(match[0]);
             });
             console.log(`✅ Loaded ${this.sentNumbers.size} already sent numbers`);
@@ -159,17 +133,18 @@ class BulkSender {
         }
     }
 
-    loadInvalidNumbers() {
-        if (fs.existsSync(this.invalidNumbersFile)) {
-            const logs = fs.readFileSync(this.invalidNumbersFile, 'utf-8');
+    loadFailedNumbers() {
+        if (fs.existsSync(this.failedNumbersFile)) {
+            const logs = fs.readFileSync(this.failedNumbersFile, 'utf-8');
             const lines = logs.split('\n');
             lines.forEach(line => {
-                const match = line.match(/\+\d+/);
-                if (match) this.invalidNumbers.add(match[0]);
+                const match = line.match(/\+?\d{10,15}/);
+                if (match) this.failedNumbers.add(match[0]);
             });
-            console.log(`⚠️ Loaded ${this.invalidNumbers.size} invalid numbers`);
+            console.log(`⚠️ Loaded ${this.failedNumbers.size} failed numbers`);
         } else {
-            fs.writeFileSync(this.invalidNumbersFile, '');
+            fs.mkdirSync(path.dirname(this.failedNumbersFile), { recursive: true });
+            fs.writeFileSync(this.failedNumbersFile, '');
         }
     }
 
@@ -184,7 +159,7 @@ class BulkSender {
             .map(num => num.trim())
             .filter(num => num.length > 0)
             .filter(num => !this.sentNumbers.has(num))
-            .filter(num => !this.invalidNumbers.has(num));
+            .filter(num => !this.failedNumbers.has(num));
 
         return numbers;
     }
@@ -196,11 +171,11 @@ class BulkSender {
         fs.appendFileSync(this.logFile, logMessage);
     }
 
-    logInvalidNumber(number, reason) {
+    logFailedNumber(number, reason) {
         const timestamp = new Date().toISOString();
-        const logMessage = `[${timestamp}] INVALID: ${number} - ${reason}\n`;
+        const logMessage = `[${timestamp}] FAILED: ${number} - ${reason}\n`;
         console.log(logMessage.trim());
-        fs.appendFileSync(this.invalidNumbersFile, logMessage);
+        fs.appendFileSync(this.failedNumbersFile, logMessage);
     }
 
     getRandomDelay() {
@@ -226,33 +201,12 @@ class BulkSender {
             }
 
             const number = numbers[0];
-            const totalProcessed = this.sentNumbers.size + this.invalidNumbers.size;
             const totalRemaining = numbers.length;
 
-            this.log(`📋 Processing: ${number} (Sent: ${this.sentNumbers.size} | Invalid: ${this.invalidNumbers.size} | Remaining: ${totalRemaining})`);
+            this.log(`📋 Processing: ${number} (Sent: ${this.sentNumbers.size} | Failed: ${this.failedNumbers.size} | Remaining: ${totalRemaining})`);
 
-            // Validate number first
-            this.log(`🔍 Validating ${number}...`);
-            const validation = await this.whatsify.validateNumber(number);
-
-            if (!validation.success) {
-                this.logInvalidNumber(number, 'Validation API failed');
-                this.invalidNumbers.add(number);
-                this.log(`⚠️ SKIPPED (validation failed): ${number}`);
-                this.isRunning = false;
-                return;
-            }
-
-            if (!validation.exists) {
-                this.logInvalidNumber(number, 'Number not on WhatsApp');
-                this.invalidNumbers.add(number);
-                this.log(`⚠️ SKIPPED (not on WhatsApp): ${number}`);
-                this.isRunning = false;
-                return;
-            }
-
-            // Number is valid, proceed to send
-            this.log(`✓ Valid WhatsApp number, sending video...`);
+            // Send directly without validation (Whatsify validation API is broken)
+            this.log(`📤 Sending video to ${number}...`);
 
             const result = await this.whatsify.sendVideo(number, this.videoFile, this.message);
 
@@ -261,7 +215,8 @@ class BulkSender {
                 this.sentNumbers.add(number);
             } else {
                 this.log(`❌ FAILED: ${number} - ${result.error}`);
-                // Don't add to invalid numbers if send fails, might be temporary issue
+                this.logFailedNumber(number, result.error);
+                this.failedNumbers.add(number);
             }
 
             const nextDelay = this.getRandomDelay();
@@ -287,7 +242,7 @@ class BulkSender {
     async start() {
         console.log('🚀 WhatsApp Bulk Sender Started!');
         console.log(`📊 Already sent: ${this.sentNumbers.size}`);
-        console.log(`⚠️ Invalid numbers: ${this.invalidNumbers.size}`);
+        console.log(`⚠️ Failed numbers: ${this.failedNumbers.size}`);
         console.log(`📹 Video: ${this.videoFile}`);
         console.log(`📞 Numbers: ${this.numbersFile}`);
         console.log('⏰ Sending every 1-2 minutes randomly\n');
@@ -319,6 +274,6 @@ sender.start();
 // Graceful shutdown
 process.on('SIGINT', () => {
     console.log('\n👋 Shutting down gracefully...');
-    console.log(`📊 Final Stats - Sent: ${sender.sentNumbers.size} | Invalid: ${sender.invalidNumbers.size}`);
+    console.log(`📊 Final Stats - Sent: ${sender.sentNumbers.size} | Failed: ${sender.failedNumbers.size}`);
     process.exit(0);
 });
